@@ -1,0 +1,13 @@
+{
+  "request": {
+    "method": "GET",
+    "pathAndQuery": "/api/v1/receiver-profiles",
+    "contractVersion": "1",
+    "body": ""
+  },
+  "legacyServerResponse": {
+    "status": 404,
+    "bodyIsIgnored": true
+  },
+  "expectedClientBehavior": "Treat discovery as unavailable and continue the existing observer flow without changing origin or pairing state."
+}

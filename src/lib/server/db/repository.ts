@@ -15,6 +15,7 @@ import type {
   CanonicalObservationV1,
   DeviceRecord,
   DeviceScope,
+  DiscoveredReceiverProfile,
   NewOrderInput,
   ObservationSource,
   PairingCredentialRecord,
@@ -23,6 +24,7 @@ import type {
   ReceiverProfileRecord,
   ReviewQueueItem,
 } from "@/lib/domain/types";
+import { isValidSourceTemplateId } from "@/lib/observer/source-template";
 import {
   createPostgresDatabase,
   type QueryExecutor,
@@ -106,6 +108,7 @@ function mapReceiverAccount(row: RawRow): ReceiverAccountRecord {
     id: string(row.id),
     label: string(row.label),
     payeeVpa: string(row.payee_vpa),
+    maskedAccountSuffix: nullableString(row.masked_account_suffix),
     verifiedAt: nullableDate(row.verified_at),
     verifiedBy: nullableString(row.verified_by),
   };
@@ -359,6 +362,8 @@ async function receiverContext(
       : string(profile.source_template_id) === event.sourceTemplateId;
   const smsTemplateValid =
     event.source !== "bank_sms" || Boolean(profile.source_template_id && event.sourceTemplateId);
+  // Creation and device discovery validate new keys. Matching deliberately keeps the v1
+  // exact-match behavior for existing profiles so a patch release cannot invalidate them.
   const sourceApproved =
     profileSource === event.source &&
     Boolean(profile.active) &&
@@ -1302,19 +1307,27 @@ export function createGatewayRepository(
     async createReceiverAccount(input: CreateReceiverAccountInput) {
       const label = input.label.trim();
       const payeeVpa = input.payeeVpa.trim().toLowerCase();
+      const providedSuffix = input.maskedAccountSuffix ?? null;
+      const maskedAccountSuffix = providedSuffix === "" ? null : providedSuffix;
       if (!label || label.length > 100) throw new GatewayRepositoryError("invalid_receiver_label");
       if (!/^[A-Za-z0-9][A-Za-z0-9._-]{1,100}@[A-Za-z0-9][A-Za-z0-9.-]{1,80}$/.test(payeeVpa)) {
         throw new GatewayRepositoryError("invalid_payee_vpa");
+      }
+      if (
+        maskedAccountSuffix !== null &&
+        (maskedAccountSuffix.length !== 4 || !/^[0-9]{4}$/.test(maskedAccountSuffix))
+      ) {
+        throw new GatewayRepositoryError("invalid_masked_account_suffix");
       }
       if (input.verified && !input.verifiedBy.trim())
         throw new GatewayRepositoryError("verification_actor_required");
       return database.transaction(async (executor) => {
         const row = await one<RawRow>(
           executor,
-          `INSERT INTO receiver_accounts (label, payee_vpa, verified_at, verified_by)
-           VALUES ($1, $2, CASE WHEN $3 THEN now() ELSE NULL END, CASE WHEN $3 THEN $4 ELSE NULL END)
+          `INSERT INTO receiver_accounts (label, payee_vpa, masked_account_suffix, verified_at, verified_by)
+           VALUES ($1, $2, $3, CASE WHEN $4 THEN now() ELSE NULL END, CASE WHEN $4 THEN $5 ELSE NULL END)
            RETURNING *`,
-          [label, payeeVpa, input.verified, input.verifiedBy.trim()],
+          [label, payeeVpa, maskedAccountSuffix, input.verified, input.verifiedBy.trim()],
         );
         if (!row) throw new Error("Receiver account insert returned no row");
         await audit(
@@ -1325,6 +1338,7 @@ export function createGatewayRepository(
           input.verifiedBy || null,
           {
             payeeVpa,
+            maskedAccountSuffix,
             verified: input.verified,
           },
         );
@@ -1337,12 +1351,72 @@ export function createGatewayRepository(
       return result.rows.map(mapReceiverProfile);
     },
 
+    async listDeviceReceiverProfiles(deviceId, configuredPayeeVpa) {
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(deviceId)) {
+        throw new GatewayRepositoryError("unknown_device");
+      }
+      const expectedPayee = configuredPayeeVpa.trim().toLowerCase();
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{1,100}@[A-Za-z0-9][A-Za-z0-9.-]{1,80}$/.test(expectedPayee)) {
+        throw new GatewayRepositoryError("invalid_payee_vpa");
+      }
+      return database.transaction(async (executor) => {
+        const device = await one<RawRow>(
+          executor,
+          "SELECT id, granted_scopes, revoked_at FROM devices WHERE id = $1 FOR SHARE",
+          [deviceId],
+        );
+        if (!device || device.revoked_at) throw new GatewayRepositoryError("unknown_device");
+        if (!scopes(device.granted_scopes).includes("observations")) {
+          throw new GatewayRepositoryError("device_scope_denied");
+        }
+        const result = await executor.query<RawRow>(
+          `SELECT p.id, p.source, p.source_template_id, a.label AS display_name,
+                  a.masked_account_suffix
+           FROM receiver_profiles p
+           JOIN devices d ON d.id = p.device_id
+           JOIN receiver_accounts a ON a.id = p.receiver_account_id
+           WHERE p.device_id = $1
+             AND p.active = true
+             AND d.revoked_at IS NULL
+             AND d.granted_scopes @> ARRAY['observations']::text[]
+             AND a.verified_at IS NOT NULL
+             AND lower(a.payee_vpa) = $2
+             AND (
+               (p.source = 'phonepe' AND p.source_template_id IS NULL)
+               OR
+               (p.source = 'bank_sms'
+                 AND p.source_template_id IS NOT NULL
+                 AND char_length(p.source_template_id) BETWEEN 1 AND 64
+                 AND p.source_template_id ~ '^[A-Za-z]'
+                 AND p.source_template_id !~ '[^A-Za-z0-9._:-]'
+                 AND char_length(regexp_replace(p.source_template_id, '[^0-9]', '', 'g')) <= 3
+                 AND p.source_template_id !~ '[0-9]{4,}')
+             )
+           ORDER BY p.created_at ASC, p.id ASC`,
+          [deviceId, expectedPayee],
+        );
+        return result.rows.map(
+          (row): DiscoveredReceiverProfile => ({
+            id: string(row.id),
+            source: string(row.source) as DiscoveredReceiverProfile["source"],
+            displayName: string(row.display_name),
+            maskedAccountSuffix: nullableString(row.masked_account_suffix),
+            sourceTemplateId: nullableString(row.source_template_id),
+          }),
+        );
+      });
+    },
+
     async createReceiverProfile(input: CreateReceiverProfileInput) {
-      if (input.source === "bank_sms" && !input.sourceTemplateId?.trim()) {
+      if (input.source === "bank_sms" && !input.sourceTemplateId) {
         throw new GatewayRepositoryError("validated_sms_template_required");
       }
-      if (input.sourceTemplateId && input.sourceTemplateId.length > 100)
+      if (
+        (input.source === "bank_sms" && !isValidSourceTemplateId(input.sourceTemplateId ?? "")) ||
+        (input.source === "phonepe" && input.sourceTemplateId !== null)
+      ) {
         throw new GatewayRepositoryError("invalid_source_template");
+      }
       const result = await database.transaction(async (executor) => {
         const device = await one<RawRow>(
           executor,
@@ -1359,7 +1433,7 @@ export function createGatewayRepository(
           executor,
           `INSERT INTO receiver_profiles (receiver_account_id, device_id, source, source_template_id)
            VALUES ($1, $2, $3, $4) RETURNING *`,
-          [input.receiverAccountId, input.deviceId, input.source, input.sourceTemplateId?.trim() || null],
+          [input.receiverAccountId, input.deviceId, input.source, input.sourceTemplateId],
         );
         if (!row) throw new Error("Receiver profile insert returned no row");
         await audit(executor, "receiver_profile_created", "receiver_profile", string(row.id), null, {

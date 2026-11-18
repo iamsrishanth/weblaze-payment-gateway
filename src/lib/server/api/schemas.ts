@@ -1,4 +1,9 @@
 import { z } from "zod";
+import { optionalMaskedAccountSuffixSchema } from "@/lib/observer/receiver-account";
+import {
+  receiverProfileSourceFields,
+  refineReceiverProfileSourceFields,
+} from "@/lib/observer/source-template";
 import { containsControlCharacters, isUtcDateTime } from "@/lib/observer/validation";
 import { MAX_AMOUNT_PAISE, MIN_AMOUNT_PAISE } from "@/lib/server/orders";
 
@@ -124,6 +129,7 @@ export const receiverAccountSchema = z
   .object({
     label: z.string().trim().min(1).max(80),
     payeeVpa: z.string().trim().min(3).max(255),
+    maskedAccountSuffix: optionalMaskedAccountSuffixSchema,
     verified: z.literal(true),
     confirmation: z.literal("I checked the receiving account in the bank record."),
   })
@@ -133,7 +139,7 @@ export const receiverProfileSchema = z
   .object({
     receiverAccountId: z.string().uuid(),
     deviceId: z.string().uuid(),
-    source: z.enum(["phonepe", "bank_sms"]),
-    sourceTemplateId: z.string().trim().min(1).max(128).nullable().optional(),
   })
-  .strict();
+  .extend(receiverProfileSourceFields.shape)
+  .strict()
+  .superRefine(refineReceiverProfileSourceFields);

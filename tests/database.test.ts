@@ -564,6 +564,34 @@ test("manual review links a reference-free credit to only the operator-selected 
   );
 });
 
+test("v1 matching continues to honor an existing bank SMS template key after profile hardening", async () => {
+  const legacyTemplateKey = "Federal Bank incoming credit template approved before v1.0.1";
+  await fixture.pglite.query("UPDATE receiver_profiles SET source_template_id = $1 WHERE id = $2", [
+    legacyTemplateKey,
+    fixture.smsProfileId,
+  ]);
+  const input = orderInput({
+    idempotencyScope: "merchant:legacy-sms-template",
+    idempotencyKey: "legacy-sms-template",
+  });
+  const order = await fixture.repository.createOrder(input);
+  const event = eventFor(input, {
+    eventId: "legacy-sms-template-credit",
+    source: "bank_sms",
+    receiverProfileId: fixture.smsProfileId,
+    sourceTransactionId: null,
+    sourceTemplateId: legacyTemplateKey,
+  });
+
+  await observe(event, "bank_sms");
+
+  assert.equal(
+    (await fixture.repository.getOrderById(order.id))?.status,
+    "notification_confirmed",
+    "legacy v1 profiles remain eligible when the event exactly matches the stored key",
+  );
+});
+
 test("database rate limits persist counts and reset after their window", async () => {
   const keyHash = createHmac("sha256", "synthetic-rate-limit-secret").update(randomUUID()).digest("hex");
   const windowStart = new Date(Date.now() - 10_000);

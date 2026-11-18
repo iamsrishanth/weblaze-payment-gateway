@@ -8,6 +8,7 @@ import {
   sign,
 } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import Module from "node:module";
 import path from "node:path";
 import { after, before, test } from "node:test";
 import { PGlite, type PGliteInterface, type Transaction } from "@electric-sql/pglite";
@@ -15,12 +16,21 @@ import jsQR from "jsqr";
 import type { QueryResultRow } from "pg";
 import { PNG } from "pngjs";
 import QRCode from "qrcode";
-import type { CanonicalObservationV1, NewOrderInput, ObservationSource } from "@/lib/domain/types";
+import type {
+  CanonicalObservationV1,
+  DiscoveredReceiverProfile,
+  NewOrderInput,
+  ObservationSource,
+} from "@/lib/domain/types";
 import { buildUpiPaymentUri, pairingResponse, paymentLinkResponse } from "@/lib/observer/checkout";
 import { makeNewOrderInput } from "@/lib/observer/order-input";
 import { deviceRateKey } from "@/lib/observer/rate-limit";
+import { optionalMaskedAccountSuffixSchema } from "@/lib/observer/receiver-account";
+import { receiverProfilesResponse, sanitizeReceiverDisplayName } from "@/lib/observer/receiver-profiles";
 import { makeCanonicalSignatureBytes, verifyDetachedP256 } from "@/lib/observer/signature-core";
+import { receiverProfileSourceSchema, sourceTemplateIdSchema } from "@/lib/observer/source-template";
 import { isUtcDateTime, isValidIdempotencyKey } from "@/lib/observer/validation";
+import { HttpError, requireEmptyRequestBody } from "@/lib/server/api/http";
 import type { QueryExecutor, TransactionalDatabase } from "@/lib/server/db/client";
 import { runMigrations } from "@/lib/server/db/migrations";
 import { createGatewayRepository, GatewayRepositoryError } from "@/lib/server/db/repository";
@@ -45,6 +55,20 @@ let acceptance: {
     body: { expiresAtOffsetSeconds: number };
   };
 };
+let receiverProfileFixture: {
+  status: number;
+  headers: Record<string, string>;
+  body: {
+    apiVersion: string;
+    gatewayOrigin: string;
+    receiverProfiles: DiscoveredReceiverProfile[];
+  };
+};
+let legacy404Fixture: {
+  request: { method: string; pathAndQuery: string; contractVersion: string; body: string };
+  legacyServerResponse: { status: number; bodyIsIgnored: boolean };
+  expectedClientBehavior: string;
+};
 
 before(async () => {
   vector = JSON.parse(
@@ -58,6 +82,12 @@ before(async () => {
   ) as { publicKey: ContractVector["publicKey"] };
   acceptance = JSON.parse(
     await readFile(path.join(process.cwd(), "contracts/fixtures/v1/payment-link-acceptance.json"), "utf8"),
+  );
+  receiverProfileFixture = JSON.parse(
+    await readFile(path.join(process.cwd(), "contracts/fixtures/v1.0.1/receiver-profiles.json"), "utf8"),
+  );
+  legacy404Fixture = JSON.parse(
+    await readFile(path.join(process.cwd(), "contracts/fixtures/v1.0.1/legacy-server-404.json"), "utf8"),
   );
 });
 
@@ -78,7 +108,13 @@ interface TestInstance {
     : never;
   profileIds: Record<ObservationSource, string>;
   receiverAccountId: string;
-  config: { origin: string; merchantDisplayName: string; upiPayeeVpa: string };
+  maskedAccountSuffix: string | null;
+  config: {
+    origin: string;
+    merchantDisplayName: string;
+    upiPayeeVpa: string;
+    maskedAccountSuffix?: string | null;
+  };
 }
 
 const instances: TestInstance[] = [];
@@ -98,6 +134,7 @@ async function createInstance(label: "A" | "B", config: TestInstance["config"]):
   const receiverAccount = await repository.createReceiverAccount({
     label: `Synthetic ${label} receiving account`,
     payeeVpa: config.upiPayeeVpa,
+    maskedAccountSuffix: config.maskedAccountSuffix,
     verifiedBy: `synthetic-${label}-operator`,
     verified: true,
   });
@@ -142,6 +179,7 @@ async function createInstance(label: "A" | "B", config: TestInstance["config"]):
     device,
     profileIds: { phonepe: phonepe.id, bank_sms: bankSms.id },
     receiverAccountId: receiverAccount.id,
+    maskedAccountSuffix: receiverAccount.maskedAccountSuffix,
     config,
   } satisfies TestInstance;
   instances.push(instance);
@@ -341,6 +379,11 @@ test("the shared ₹499.50 acceptance fixture creates one fixed-payee link and c
     merchantDisplayName: "Example Workshop A",
     upiPayeeVpa: "fixture.merchant@upi",
   });
+  assert.equal(
+    instance.maskedAccountSuffix,
+    null,
+    "receiver account suffix is optional and defaults to null",
+  );
   const now = new Date();
   const expiresAt = new Date(now.getTime() + acceptance.createRequest.body.expiresAtOffsetSeconds * 1000);
   const input = makeLinkInput(instance, {
@@ -533,6 +576,507 @@ test("signed device limits use a per-device HMAC database bucket", async () => {
     true,
     "a separate device has an independent bucket",
   );
+  const discoveryKey = deviceRateKey(instance.device.id, "device-receiver-profile-discovery", sharedSecret);
+  assert.notEqual(discoveryKey, key, "profile discovery has its own per-device request bucket");
+  assert.equal(await instance.repository.allowRateLimit(discoveryKey, 1, 60, now), true);
+  assert.equal(
+    await instance.repository.allowRateLimit(discoveryKey, 1, 60, new Date(now.getTime() + 1)),
+    false,
+  );
+});
+
+test("receiver-profile discovery filters ownership, grant, active/verified account, and configured payee", async () => {
+  const instance = await createInstance("B", {
+    origin: "https://gateway-profile-discovery.example.test",
+    merchantDisplayName: "Synthetic Discovery Merchant",
+    upiPayeeVpa: "discovery.merchant@upi",
+    maskedAccountSuffix: "4827",
+  });
+  assert.equal(instance.maskedAccountSuffix, "4827");
+  const otherPayeeAccount = await instance.repository.createReceiverAccount({
+    label: "Synthetic unrelated receiver",
+    payeeVpa: "other.receiver@upi",
+    verifiedBy: "synthetic-operator",
+    verified: true,
+  });
+  const wrongPayeeProfile = await instance.repository.createReceiverProfile({
+    receiverAccountId: otherPayeeAccount.id,
+    deviceId: instance.device.id,
+    source: "bank_sms",
+    sourceTemplateId: "wrong-payee-template-v1",
+  });
+  const inactiveProfile = await instance.repository.createReceiverProfile({
+    receiverAccountId: instance.receiverAccountId,
+    deviceId: instance.device.id,
+    source: "bank_sms",
+    sourceTemplateId: "inactive-template-v1",
+  });
+  const invalidPhonePeProfileId = randomUUID();
+  const unsafeLegacySmsProfileId = randomUUID();
+  await instance.pglite.query(
+    `INSERT INTO receiver_profiles
+       (id, receiver_account_id, device_id, source, source_template_id, active, created_at)
+     VALUES ($1, $2, $3, 'phonepe', 'phonepe-must-not-have-template', true, now())`,
+    [invalidPhonePeProfileId, instance.receiverAccountId, instance.device.id],
+  );
+  await instance.pglite.query(
+    `INSERT INTO receiver_profiles
+       (id, receiver_account_id, device_id, source, source_template_id, active, created_at)
+     VALUES ($1, $2, $3, 'bank_sms', 'bank-credit-123456', true, now())`,
+    [unsafeLegacySmsProfileId, instance.receiverAccountId, instance.device.id],
+  );
+  await instance.pglite.query("UPDATE receiver_profiles SET active = false WHERE id = $1", [
+    inactiveProfile.id,
+  ]);
+
+  const otherDeviceCode = `other-device-${randomBytes(8).toString("hex")}`;
+  const otherDeviceCodeHash = createHash("sha256").update(otherDeviceCode).digest("hex");
+  await instance.repository.createPairingCredential({
+    codeHash: otherDeviceCodeHash,
+    expiresAt: new Date(Date.now() + 10 * 60_000),
+    grantedScopes: ["observations"],
+    createdBy: "synthetic-operator",
+  });
+  const otherDeviceId = randomUUID();
+  await instance.repository.pairDevice({
+    pairingCodeHash: otherDeviceCodeHash,
+    deviceId: otherDeviceId,
+    deviceName: "Synthetic second observer",
+    publicKeyJwk: { kty: "EC", crv: "P-256", x: "other-device-x", y: "other-device-y" },
+    nonce: randomBytes(16).toString("base64url"),
+    nonceExpiresAt: new Date(Date.now() + 10 * 60_000),
+    pairedAt: new Date(),
+  });
+  const otherDeviceProfile = await instance.repository.createReceiverProfile({
+    receiverAccountId: instance.receiverAccountId,
+    deviceId: otherDeviceId,
+    source: "phonepe",
+    sourceTemplateId: null,
+  });
+
+  const ownProfiles = await instance.repository.listDeviceReceiverProfiles(
+    instance.device.id,
+    instance.config.upiPayeeVpa,
+  );
+  assert.deepEqual(
+    ownProfiles.map((profile) => profile.id).sort(),
+    [instance.profileIds.phonepe, instance.profileIds.bank_sms].sort(),
+    "other payee, inactive, invalid source/template, and other-device profiles are omitted",
+  );
+  assert.equal(
+    ownProfiles.some((profile) => profile.id === wrongPayeeProfile.id),
+    false,
+  );
+  assert.equal(
+    ownProfiles.some((profile) => profile.id === inactiveProfile.id),
+    false,
+  );
+  assert.equal(
+    ownProfiles.some((profile) => profile.id === invalidPhonePeProfileId),
+    false,
+  );
+  assert.equal(
+    ownProfiles.some((profile) => profile.id === unsafeLegacySmsProfileId),
+    false,
+  );
+  const otherDeviceProfiles = await instance.repository.listDeviceReceiverProfiles(
+    otherDeviceId,
+    instance.config.upiPayeeVpa,
+  );
+  assert.deepEqual(
+    otherDeviceProfiles.map((profile) => profile.id),
+    [otherDeviceProfile.id],
+  );
+
+  const response = receiverProfilesResponse(instance.config.origin, ownProfiles);
+  assert.equal(response.apiVersion, "1.0.0");
+  assert.equal(response.gatewayOrigin, instance.config.origin);
+  assert.deepEqual(Object.keys(response).sort(), ["apiVersion", "gatewayOrigin", "receiverProfiles"]);
+  for (const profile of response.receiverProfiles) {
+    assert.deepEqual(Object.keys(profile).sort(), [
+      "displayName",
+      "id",
+      "maskedAccountSuffix",
+      "source",
+      "sourceTemplateId",
+    ]);
+    assert.equal(profile.maskedAccountSuffix, "4827", "only the stored last-four hint is returned");
+  }
+  const serialized = JSON.stringify(response);
+  assert.equal(serialized.includes(instance.config.upiPayeeVpa), false);
+  assert.equal(serialized.includes(instance.device.id), false);
+  assert.equal(serialized.includes(otherDeviceId), false);
+  assert.equal(serialized.includes(instance.receiverAccountId), false);
+  assert.equal(serialized.includes("synthetic-operator"), false);
+  assert.equal(serialized.includes("discovery.merchant@upi"), false);
+
+  await instance.pglite.query(
+    "UPDATE receiver_accounts SET verified_at = NULL, verified_by = NULL WHERE id = $1",
+    [instance.receiverAccountId],
+  );
+  assert.deepEqual(
+    await instance.repository.listDeviceReceiverProfiles(instance.device.id, instance.config.upiPayeeVpa),
+    [],
+    "a profile attached to an unverified account is hidden",
+  );
+  await instance.pglite.query(
+    "UPDATE receiver_accounts SET verified_at = now(), verified_by = 'synthetic-operator' WHERE id = $1",
+    [instance.receiverAccountId],
+  );
+
+  const noObservationCode = `no-observations-${randomBytes(8).toString("hex")}`;
+  const noObservationCodeHash = createHash("sha256").update(noObservationCode).digest("hex");
+  await instance.repository.createPairingCredential({
+    codeHash: noObservationCodeHash,
+    expiresAt: new Date(Date.now() + 10 * 60_000),
+    grantedScopes: ["links:read_own"],
+    createdBy: "synthetic-operator",
+  });
+  const noObservationDeviceId = randomUUID();
+  await instance.repository.pairDevice({
+    pairingCodeHash: noObservationCodeHash,
+    deviceId: noObservationDeviceId,
+    deviceName: "Synthetic no-observations phone",
+    publicKeyJwk: { kty: "EC", crv: "P-256", x: "no-observations-x", y: "no-observations-y" },
+    nonce: randomBytes(16).toString("base64url"),
+    nonceExpiresAt: new Date(Date.now() + 10 * 60_000),
+    pairedAt: new Date(),
+  });
+  await assert.rejects(
+    instance.repository.listDeviceReceiverProfiles(noObservationDeviceId, instance.config.upiPayeeVpa),
+    (error: unknown) => error instanceof GatewayRepositoryError && error.code === "device_scope_denied",
+  );
+  await instance.repository.revokeDevice(instance.device.id, "synthetic-operator");
+  await assert.rejects(
+    instance.repository.listDeviceReceiverProfiles(instance.device.id, instance.config.upiPayeeVpa),
+    (error: unknown) => error instanceof GatewayRepositoryError && error.code === "unknown_device",
+  );
+});
+
+test("contract 1.0.1 matches repository output and tolerates a legacy server 404", async () => {
+  assert.equal(receiverProfileFixture.status, 200);
+  assert.equal(receiverProfileFixture.headers["Cache-Control"], "no-store, private");
+  assert.equal(receiverProfileFixture.body.apiVersion, "1.0.0");
+  assert.equal(receiverProfileFixture.body.receiverProfiles.length, 2);
+  assert.equal(receiverProfileFixture.body.receiverProfiles[0].maskedAccountSuffix, "4827");
+
+  const instance = await createInstance("A", {
+    origin: receiverProfileFixture.body.gatewayOrigin,
+    merchantDisplayName: "Example Workshop",
+    upiPayeeVpa: "fixture.merchant@upi",
+    maskedAccountSuffix: "4827",
+  });
+  await instance.pglite.query("UPDATE receiver_accounts SET label = $1 WHERE id = $2", [
+    "Example Workshop current account",
+    instance.receiverAccountId,
+  ]);
+  await instance.pglite.query("UPDATE receiver_profiles SET id = $1 WHERE id = $2", [
+    receiverProfileFixture.body.receiverProfiles[0].id,
+    instance.profileIds.phonepe,
+  ]);
+  await instance.pglite.query("UPDATE receiver_profiles SET id = $1 WHERE id = $2", [
+    receiverProfileFixture.body.receiverProfiles[1].id,
+    instance.profileIds.bank_sms,
+  ]);
+  instance.profileIds.phonepe = receiverProfileFixture.body.receiverProfiles[0].id;
+  instance.profileIds.bank_sms = receiverProfileFixture.body.receiverProfiles[1].id;
+  const repositoryProfiles = await instance.repository.listDeviceReceiverProfiles(
+    instance.device.id,
+    instance.config.upiPayeeVpa,
+  );
+  assert.deepEqual(
+    receiverProfilesResponse(instance.config.origin, repositoryProfiles),
+    receiverProfileFixture.body,
+    "actual database query and serializer output must match the published fixture",
+  );
+  assert.equal(legacy404Fixture.request.pathAndQuery, "/api/v1/receiver-profiles");
+  assert.equal(legacy404Fixture.legacyServerResponse.status, 404);
+  assert.equal(legacy404Fixture.legacyServerResponse.bodyIsIgnored, true);
+  assert.match(legacy404Fixture.expectedClientBehavior, /existing observer flow/);
+});
+
+test("receiver-account creation accepts only an optional four-digit suffix and never a full number", async () => {
+  const instance = await createInstance("A", {
+    origin: "https://gateway-profile-suffix.example.test",
+    merchantDisplayName: "Synthetic Suffix Merchant",
+    upiPayeeVpa: "suffix.merchant@upi",
+  });
+  assert.equal(instance.maskedAccountSuffix, null, "omitting a suffix persists null");
+  const defaultProfiles = await instance.repository.listDeviceReceiverProfiles(
+    instance.device.id,
+    instance.config.upiPayeeVpa,
+  );
+  assert.ok(defaultProfiles.length > 0);
+  assert.ok(defaultProfiles.every((profile) => profile.maskedAccountSuffix === null));
+
+  assert.equal(
+    optionalMaskedAccountSuffixSchema.parse(""),
+    null,
+    "a blank optional input normalizes to null",
+  );
+  assert.equal(optionalMaskedAccountSuffixSchema.parse("4827"), "4827");
+  for (const unsafeSuffix of ["123", "12345", "12a4", "1234 5678", "123456789012", "4827\n"]) {
+    assert.equal(
+      optionalMaskedAccountSuffixSchema.safeParse(unsafeSuffix).success,
+      false,
+      `schema rejects ${unsafeSuffix}`,
+    );
+    await assert.rejects(
+      instance.repository.createReceiverAccount({
+        label: "Synthetic invalid suffix receiver",
+        payeeVpa: `invalid${unsafeSuffix.replace(/\D/g, "x")}@upi`,
+        maskedAccountSuffix: unsafeSuffix,
+        verifiedBy: "synthetic-operator",
+        verified: true,
+      }),
+      (error: unknown) =>
+        error instanceof GatewayRepositoryError && error.code === "invalid_masked_account_suffix",
+    );
+  }
+
+  const persisted = await instance.repository.createReceiverAccount({
+    label: "Synthetic suffix receiver",
+    payeeVpa: "suffix.receiver@upi",
+    maskedAccountSuffix: "4827",
+    verifiedBy: "synthetic-operator",
+    verified: true,
+  });
+  assert.equal(persisted.maskedAccountSuffix, "4827");
+  const accountRow = await instance.pglite.query<{ masked_account_suffix: string }>(
+    "SELECT masked_account_suffix FROM receiver_accounts WHERE id = $1",
+    [persisted.id],
+  );
+  assert.equal(accountRow.rows[0].masked_account_suffix, "4827");
+  await assert.rejects(
+    instance.pglite.query("UPDATE receiver_accounts SET masked_account_suffix = '12345' WHERE id = $1", [
+      persisted.id,
+    ]),
+    /receiver_accounts_masked_account_suffix_check/,
+    "the migration CHECK constraint rejects values outside the four-digit format",
+  );
+});
+
+test("receiver-profile labels allow short Unicode text and replace sensitive or malformed values", () => {
+  assert.equal(sanitizeReceiverDisplayName("  Café   &   Main   account  "), "Café & Main account");
+  for (const unsafeLabel of [
+    "Account 1234 5678 9012",
+    "Merchant 12345678",
+    "merchant@upi",
+    "owner@example.test",
+    "Main\nAccount",
+    "Hidden\u200bIdentifier",
+    "Account #42",
+  ]) {
+    assert.equal(sanitizeReceiverDisplayName(unsafeLabel), "Verified receiving account");
+    const response = receiverProfilesResponse("https://gateway.operator.example", [
+      {
+        id: randomUUID(),
+        source: "phonepe",
+        displayName: unsafeLabel,
+        maskedAccountSuffix: null,
+        sourceTemplateId: null,
+      },
+    ]);
+    assert.equal(response.receiverProfiles[0].displayName, "Verified receiving account");
+    assert.equal(
+      JSON.stringify(response).includes(unsafeLabel),
+      false,
+      "unsafe label never appears in device response",
+    );
+  }
+  const unsafeSuffixResponse = receiverProfilesResponse("https://gateway.operator.example", [
+    {
+      id: randomUUID(),
+      source: "phonepe",
+      displayName: "Main receiving account",
+      maskedAccountSuffix: "123456789012",
+      sourceTemplateId: null,
+    },
+  ]);
+  assert.equal(unsafeSuffixResponse.receiverProfiles[0].maskedAccountSuffix, null);
+  assert.equal(JSON.stringify(unsafeSuffixResponse).includes("123456789012"), false);
+});
+
+test("source template IDs use non-sensitive keys for receiver profiles", async () => {
+  assert.equal(sourceTemplateIdSchema.safeParse("Bank-credit:V1").success, true);
+  assert.equal(sourceTemplateIdSchema.safeParse("A_1.v2-key:bank").success, true);
+  for (const unsafeKey of [
+    "123-bank-credit",
+    "bank@upi",
+    "bank template",
+    "bank-credit-1234",
+    "bank-credit-1234567890",
+    "bank-123-456-7890",
+    "account-12-34-56-78",
+    "bank-credit\n",
+    "a".repeat(65),
+  ]) {
+    assert.equal(sourceTemplateIdSchema.safeParse(unsafeKey).success, false, unsafeKey);
+  }
+  assert.equal(
+    receiverProfileSourceSchema.safeParse({ source: "bank_sms", sourceTemplateId: "Bank-credit:V1" }).success,
+    true,
+  );
+  assert.equal(
+    receiverProfileSourceSchema.safeParse({ source: "bank_sms", sourceTemplateId: null }).success,
+    false,
+  );
+  assert.equal(
+    receiverProfileSourceSchema.safeParse({ source: "phonepe", sourceTemplateId: "PhonePe:V1" }).success,
+    false,
+  );
+
+  const instance = await createInstance("A", {
+    origin: "https://gateway-source-key.example.test",
+    merchantDisplayName: "Synthetic Source Key Merchant",
+    upiPayeeVpa: "source.key@upi",
+  });
+  await assert.rejects(
+    instance.repository.createReceiverProfile({
+      receiverAccountId: instance.receiverAccountId,
+      deviceId: instance.device.id,
+      source: "bank_sms",
+      sourceTemplateId: "bank-credit-1234",
+    }),
+    (error: unknown) => error instanceof GatewayRepositoryError && error.code === "invalid_source_template",
+  );
+  await assert.rejects(
+    instance.repository.createReceiverProfile({
+      receiverAccountId: instance.receiverAccountId,
+      deviceId: instance.device.id,
+      source: "phonepe",
+      sourceTemplateId: "PhonePe:V1",
+    }),
+    (error: unknown) => error instanceof GatewayRepositoryError && error.code === "invalid_source_template",
+  );
+  const unsafeLegacyResponse = receiverProfilesResponse("https://gateway.operator.example", [
+    {
+      id: randomUUID(),
+      source: "bank_sms",
+      displayName: "Main receiving account",
+      maskedAccountSuffix: null,
+      sourceTemplateId: "bank-123-456-7890",
+    },
+  ]);
+  assert.deepEqual(unsafeLegacyResponse.receiverProfiles, []);
+  assert.equal(JSON.stringify(unsafeLegacyResponse).includes("bank-123-456-7890"), false);
+});
+
+test("receiver-profile signed GET rejects any body before authentication with bounded size handling", async () => {
+  await assert.doesNotReject(() => requireEmptyRequestBody({ body: null } as Request));
+  await assert.rejects(
+    requireEmptyRequestBody({
+      body: new ReadableStream({
+        start(controller) {
+          controller.close();
+        },
+      }),
+      headers: new Headers({ "content-length": "0" }),
+    } as Request),
+    (error: unknown) => error instanceof HttpError && error.status === 400,
+  );
+  await assert.rejects(
+    requireEmptyRequestBody({
+      body: new ReadableStream(),
+      headers: new Headers({ "content-length": String(32 * 1024 + 1) }),
+    } as Request),
+    (error: unknown) => error instanceof HttpError && error.status === 413,
+  );
+});
+
+test("receiver-profile route rejects a nonempty body before auth and returns the fixture without caching", async () => {
+  const instance = await createInstance("B", {
+    origin: receiverProfileFixture.body.gatewayOrigin,
+    merchantDisplayName: "Example Workshop",
+    upiPayeeVpa: "fixture.merchant@upi",
+    maskedAccountSuffix: "4827",
+  });
+  await instance.pglite.query("UPDATE receiver_accounts SET label = $1 WHERE id = $2", [
+    "Example Workshop current account",
+    instance.receiverAccountId,
+  ]);
+  await instance.pglite.query("UPDATE receiver_profiles SET id = $1 WHERE id = $2", [
+    receiverProfileFixture.body.receiverProfiles[0].id,
+    instance.profileIds.phonepe,
+  ]);
+  await instance.pglite.query("UPDATE receiver_profiles SET id = $1 WHERE id = $2", [
+    receiverProfileFixture.body.receiverProfiles[1].id,
+    instance.profileIds.bank_sms,
+  ]);
+
+  const moduleLoader = Module as unknown as {
+    _load: (request: string, parent: unknown, isMain: boolean) => unknown;
+  };
+  const originalLoad = moduleLoader._load;
+  let authenticationCalls = 0;
+  let rateLimitCall: unknown;
+  moduleLoader._load = ((request, parent, isMain) => {
+    if (request === "server-only") return {};
+    if (request === "@/lib/config") {
+      return {
+        loadGatewayConfig: () => ({
+          gatewayPublicOrigin: instance.config.origin,
+          upiPayeeVpa: instance.config.upiPayeeVpa,
+        }),
+      };
+    }
+    if (request === "@/lib/server/api/rate-limit") {
+      return {
+        enforceDeviceRateLimit: async (...args: unknown[]) => {
+          rateLimitCall = args;
+        },
+      };
+    }
+    if (request === "@/lib/server/api/signature") {
+      const signatureModule = originalLoad.call(Module, request, parent, isMain) as Record<string, unknown>;
+      return {
+        ...signatureModule,
+        authenticateSignedDevice: async () => {
+          authenticationCalls += 1;
+          return { device: { id: instance.device.id } };
+        },
+      };
+    }
+    if (request === "@/lib/server/db/repository") {
+      return { getRepository: async () => instance.repository };
+    }
+    return originalLoad.call(Module, request, parent, isMain);
+  }) as typeof moduleLoader._load;
+  try {
+    const route = await import("../src/app/api/v1/receiver-profiles/route");
+    const invalidRequest = {
+      headers: new Headers({
+        "X-Weblaze-Contract-Version": "1",
+        "content-length": "4",
+      }),
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("data"));
+          controller.close();
+        },
+      }),
+    } as Request;
+    const invalidResponse = await route.GET(invalidRequest);
+    assert.equal(invalidResponse.status, 400);
+    assert.equal((await invalidResponse.json()).error.code, "invalid_request");
+    assert.equal(authenticationCalls, 0, "nonempty GET bodies are rejected before device authentication");
+
+    const validResponse = await route.GET({
+      url: `${instance.config.origin}/api/v1/receiver-profiles`,
+      headers: new Headers({
+        "X-Weblaze-Contract-Version": "1",
+        host: new URL(instance.config.origin).host,
+      }),
+      body: null,
+    } as Request);
+    assert.equal(validResponse.status, 200);
+    assert.equal(validResponse.headers.get("cache-control"), "no-store, private");
+    assert.deepEqual(await validResponse.json(), receiverProfileFixture.body);
+    assert.equal(authenticationCalls, 1);
+    assert.deepEqual(rateLimitCall, [instance.device.id, "device-receiver-profile-discovery", 120, 60]);
+  } finally {
+    moduleLoader._load = originalLoad;
+  }
 });
 
 test("two synthetic installations isolate settings, checkout links, pairing, and observed matches", async () => {

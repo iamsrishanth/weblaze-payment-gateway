@@ -77,6 +77,7 @@ export interface ReceiverAccountRecord {
   id: string;
   label: string;
   payeeVpa: string;
+  maskedAccountSuffix: string | null;
   verifiedAt: Date | null;
   verifiedBy: string | null;
 }
@@ -89,6 +90,14 @@ export interface ReceiverProfileRecord {
   sourceTemplateId: string | null;
   active: boolean;
   createdAt: Date;
+}
+
+export interface DiscoveredReceiverProfile {
+  id: string;
+  source: ObservationSource;
+  displayName: string;
+  maskedAccountSuffix: string | null;
+  sourceTemplateId: string | null;
 }
 
 export interface ReviewQueueItem {

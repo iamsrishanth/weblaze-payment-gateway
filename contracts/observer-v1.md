@@ -1,6 +1,6 @@
 # Weblaze Observer Contract v1
 
-This document and `openapi.yaml` define the interoperable Android-to-gateway API. The wire protocol contains no merchant or hostname constants. Each installation returns its own canonical origin, display name, and receiving VPA during pairing. The owner Android application may pin this contract repository at tag `contract-v1.0.0`; independent installations use the same contract and pair afresh.
+This document and `openapi.yaml` define the interoperable Android-to-gateway API. The wire protocol contains no merchant or hostname constants. Each installation returns its own canonical origin, display name, and receiving VPA during pairing. The tested backward-compatible contract patch is `contract-v1.0.1`; `contract-v1.0.0` remains the original immutable baseline. The API's negotiated `apiVersion` remains `1.0.0`. Independent installations use the same contract and pair afresh.
 
 ## Version negotiation
 
@@ -59,9 +59,40 @@ The signature is `ECDSA(P-256, SHA-256(canonical bytes))`, DER-encoded and base6
 
 ## Rate limits
 
-After a valid signature and scope check, each device receives up to 120 observation uploads per minute, 30 payment-link creations per minute, and 120 own-link list requests per minute. These buckets are keyed by an HMAC of the installation secret and device ID, so client-supplied IP headers cannot move a signed device between buckets. A limit response is HTTP `429` with `Retry-After` and `retryAfterSeconds`; the attempt is not accepted. A retry must wait, then use a fresh nonce and the same event ID or idempotency key. Public checkout status is limited to 120 requests per minute per request source, and pairing attempts are limited to 10 per 10 minutes per request source.
+After a valid signature and scope check, each device receives up to 120 observation uploads per minute, 30 payment-link creations per minute, 120 own-link list requests per minute, and 120 receiver-profile discovery requests per minute. These buckets are keyed by an HMAC of the installation secret and device ID, so client-supplied IP headers cannot move a signed device between buckets. A limit response is HTTP `429` with `Retry-After` and `retryAfterSeconds`; the attempt is not accepted. A retry must wait, then use a fresh nonce and the same event ID or idempotency key. Public checkout status is limited to 120 requests per minute per request source, and pairing attempts are limited to 10 per 10 minutes per request source.
 
 The server records a valid nonce durably with the operation. A repeated nonce fails with HTTP `409 replay_detected`, even if the body is identical. If a response was lost, the client MUST send the same event or idempotent link with a fresh nonce; exact event or idempotency replay is safe. A body changed after signing fails signature validation. A repeated event ID with different normalized content returns HTTP `409 event_id_conflict`.
+
+## Receiver-profile discovery (contract patch v1.0.1)
+
+`GET /api/v1/receiver-profiles` is an optional backward-compatible discovery endpoint. It requires the `observations` grant and the same signed request envelope as other device endpoints, with an empty body, a fresh nonce, and the configured HTTPS origin. Any non-null request body is rejected before authentication; bodies above 32 KiB receive HTTP `413`, and smaller bodies receive HTTP `400`. The server checks device status and scope on each request. It returns `Cache-Control: no-store, private` and only profiles assigned to that device that are active, have a verified receiving account, and match the current instance's configured payee VPA. A changed or stale receiver account is not exposed.
+
+The response keeps `apiVersion: "1.0.0"`. Each `displayName` is the operator-entered, non-sensitive verified account label. The device response normalizes and collapses whitespace, then allows only short Unicode letters, marks, spaces, and ordinary punctuation; other values become `Verified receiving account`. A `bank_sms` profile has its exact nonempty operator-approved `sourceTemplateId`; `phonepe` profiles have `sourceTemplateId: null`. A receiver-profile `sourceTemplateId` uses a restricted key format: 1–64 characters, starts with an ASCII letter, contains only ASCII letters, digits, period, underscore, colon, and hyphen, and has at most three digits total. New admin profile creation rejects invalid keys, and discovery omits unsafe legacy profiles. Existing v1 observations still match their configured receiver profile by exact stored key, including legacy keys that discovery omits. Operators must still choose a non-sensitive key; a character filter cannot identify every encoded or letter-based personal identifier. `maskedAccountSuffix` is either null or exactly four ASCII digits. Operators may enter only the last four digits when creating a receiver account; the gateway rejects and never stores a full account number. Full receiver VPAs, account numbers, device IDs, and private verification records are never included.
+
+```json
+{
+  "apiVersion": "1.0.0",
+  "gatewayOrigin": "https://gateway.operator.example",
+  "receiverProfiles": [
+    {
+      "id": "c14cd31a-0299-46a4-b94a-90ead0506b77",
+      "source": "phonepe",
+      "displayName": "Example Workshop current account",
+      "maskedAccountSuffix": "4827",
+      "sourceTemplateId": null
+    },
+    {
+      "id": "73577f00-f681-4c2d-ae5c-aadd406f9922",
+      "source": "bank_sms",
+      "displayName": "Example Workshop current account",
+      "maskedAccountSuffix": "4827",
+      "sourceTemplateId": "fixture-bank-credit-v1"
+    }
+  ]
+}
+```
+
+The endpoint was added without changing the contract-version header or existing request schemas. Gateways on `contract-v1.0.0` may return HTTP `404` because they do not implement this optional route. Clients must handle that status as “receiver-profile discovery unavailable,” ignore the response body, and retain their existing observer behavior; they must not treat it as a pairing/authentication failure or try another origin.
 
 ## Canonical observation event
 
@@ -117,7 +148,7 @@ The values above are synthetic. `GET /api/v1/payment-links` requires `links:read
 
 ## Errors and retries
 
-Errors use `{"error":{"code":"...","message":"..."}}`. `400 invalid_request` covers malformed fields; `401 unauthorized` covers missing or invalid auth; `403 insufficient_scope` covers grants; `404 not_found` hides foreign order identifiers; `409` covers conflicts, replay, or unsupported versions; `410 pairing_expired` covers used/expired pairing; `413 body_too_large` covers bodies above 32 KiB; `429 rate_limited` includes a bounded `Retry-After` HTTP header in seconds and the same value as JSON `retryAfterSeconds`; and `500 internal_error` contains no secrets or personal data. Clients may retry transient `5xx` responses with a fresh timestamp/nonce and the same event ID or idempotency key. A client MUST NOT infer a payment from a UPI app callback, screenshot, button click, or lack of an API error.
+Errors use `{"error":{"code":"...","message":"..."}}`. `400 invalid_request` covers malformed fields; `400 https_required` means a pairing or signed-device request did not use HTTPS, except for an explicitly allowed local-development origin; `401 unauthorized` covers missing or invalid auth; `403 insufficient_scope` covers grants; `404 not_found` hides foreign order identifiers; `409` covers conflicts, replay, or unsupported versions; `410 pairing_expired` covers used/expired pairing; `413 body_too_large` covers bodies above 32 KiB; `421 origin_mismatch` means the HTTP `Host` or `X-Forwarded-Host` header differs from the configured gateway hostname; `429 rate_limited` includes a bounded `Retry-After` HTTP header in seconds and the same value as JSON `retryAfterSeconds`; and `500 internal_error` contains no secrets or personal data. Clients may retry transient `5xx` responses with a fresh timestamp/nonce and the same event ID or idempotency key. A client MUST NOT infer a payment from a UPI app callback, screenshot, button click, or lack of an API error.
 
 ## Synthetic interoperability material
 

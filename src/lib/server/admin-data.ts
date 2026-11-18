@@ -71,6 +71,7 @@ export async function getAdminTerminalData() {
       id: account.id,
       label: account.label,
       payeeVpa: account.payeeVpa,
+      maskedAccountSuffix: account.maskedAccountSuffix,
       verifiedAt: account.verifiedAt?.toISOString() ?? null,
       verifiedBy: account.verifiedBy,
     })),

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Weblaze Payment Gateway and Observer API
-  version: 1.0.0
+  version: 1.0.1
   description: >-
     Single-merchant, INR-only direct UPI checkout and merchant-phone observer.
     Hostnames, merchant labels, receiving VPAs, and credentials are instance
@@ -14,6 +14,7 @@ tags:
   - name: Orders
   - name: Device pairing
   - name: Observations
+  - name: Receiver profile discovery
   - name: Mobile payment links
   - name: Customer checkout
 security: []
@@ -278,6 +279,79 @@ paths:
           $ref: "#/components/responses/Conflict"
         "429":
           $ref: "#/components/responses/RateLimited"
+  /api/v1/receiver-profiles:
+    get:
+      tags: [Receiver profile discovery]
+      summary: List this device's verified receiver profiles
+      description: |
+        Optional backward-compatible contract-v1.0.1 extension. Requires the
+        observations grant and a fresh signed GET with an empty body. A nonempty
+        body up to 32 KiB receives 400; a larger body receives 413, all before
+        authentication. Requests are limited to 120 per device per minute. Returns only
+        active profiles owned by this device whose receiving account is verified
+        and matches this gateway's configured payee. It never returns a full
+        receiving VPA or bank account number. The free-text display label is
+        normalized and limited to short Unicode letters, marks, spaces, and
+        ordinary punctuation; other values become a generic label. A profile's
+        sourceTemplateId uses a restricted key format: 1-64 characters, begins
+        with a letter, uses only letters, digits, period, underscore, colon, or
+        hyphen, contains at most three digits total, and has no run of four
+        digits. Unsafe legacy profiles are omitted. Operators must still use
+        non-sensitive template keys; format checks cannot identify every encoded
+        or letter-based personal identifier.
+        Older gateways may return 404; a
+        client should treat that as an unsupported optional capability and keep
+        its existing observer flow.
+      operationId: listDeviceReceiverProfiles
+      security:
+        - DeviceId: []
+      parameters:
+        - $ref: "#/components/parameters/ContractVersion"
+        - $ref: "#/components/parameters/Timestamp"
+        - $ref: "#/components/parameters/Nonce"
+        - $ref: "#/components/parameters/Signature"
+      responses:
+        "200":
+          description: Active verified profiles scoped to the signed-in device
+          headers:
+            Cache-Control:
+              schema: { type: string, const: "no-store, private" }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReceiverProfilesResponse"
+              example:
+                apiVersion: "1.0.0"
+                gatewayOrigin: "https://gateway.operator.example"
+                receiverProfiles:
+                  - id: "c14cd31a-0299-46a4-b94a-90ead0506b77"
+                    source: phonepe
+                    displayName: "Example Workshop current account"
+                    maskedAccountSuffix: "4827"
+                    sourceTemplateId: null
+                  - id: "73577f00-f681-4c2d-ae5c-aadd406f9922"
+                    source: bank_sms
+                    displayName: "Example Workshop current account"
+                    maskedAccountSuffix: "4827"
+                    sourceTemplateId: "fixture-bank-credit-v1"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/InsufficientScope"
+        "404":
+          description: Older gateway does not implement this optional endpoint; clients must preserve their existing observer behavior.
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "421":
+          $ref: "#/components/responses/Misdirected"
+        "413":
+          $ref: "#/components/responses/BodyTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /api/public/checkouts/{token}/status:
     get:
       tags: [Customer checkout]
@@ -444,6 +518,40 @@ components:
           type: array
           uniqueItems: true
           items: { $ref: "#/components/schemas/DeviceScope" }
+    DiscoveredReceiverProfile:
+      type: object
+      additionalProperties: false
+      required: [id, source, displayName, maskedAccountSuffix, sourceTemplateId]
+      properties:
+        id: { type: string, format: uuid }
+        source: { type: string, enum: [phonepe, bank_sms] }
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: Sanitized non-sensitive label; unsafe text is replaced by a generic label.
+        maskedAccountSuffix:
+          type: [string, "null"]
+          minLength: 4
+          maxLength: 4
+          pattern: "^[0-9]{4}$"
+          description: Optional stored last-four hint; the gateway never accepts or stores a full bank account number.
+        sourceTemplateId:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 64
+          pattern: "^(?!.*[0-9].*[0-9].*[0-9].*[0-9])[A-Za-z][A-Za-z0-9._:-]{0,63}$"
+          description: Non-sensitive operator-approved key with at most three digits total; required for bank_sms and null for phonepe.
+    ReceiverProfilesResponse:
+      type: object
+      additionalProperties: false
+      required: [apiVersion, gatewayOrigin, receiverProfiles]
+      properties:
+        apiVersion: { type: string, const: "1.0.0" }
+        gatewayOrigin: { type: string, format: uri }
+        receiverProfiles:
+          type: array
+          items: { $ref: "#/components/schemas/DiscoveredReceiverProfile" }
     DeviceScope:
       type: string
       enum: [observations, "links:create", "links:read_own"]
@@ -511,7 +619,10 @@ components:
           enum: [Awaiting payment, Payment notification received, Payment being reviewed, Link expired]
   responses:
     InvalidRequest:
-      description: Request fields or canonical signing headers are invalid
+      description: >-
+        Request fields or canonical signing headers are invalid. Pairing and signed device requests
+        made without HTTPS return error code https_required with HTTP 400, except explicitly allowed
+        local development origins.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorEnvelope" }
@@ -532,6 +643,18 @@ components:
           schema: { $ref: "#/components/schemas/ErrorEnvelope" }
     NotFound:
       description: Resource not found or not owned by the authenticated principal
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    InternalError:
+      description: Request could not be completed; response contains no secrets or private evidence.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    Misdirected:
+      description: >-
+        The Host or X-Forwarded-Host header does not match this gateway's configured hostname.
+        Requests without HTTPS use HTTP 400 with error code https_required instead.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorEnvelope" }

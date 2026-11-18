@@ -1,0 +1,26 @@
+{
+  "status": 200,
+  "headers": {
+    "Cache-Control": "no-store, private"
+  },
+  "body": {
+    "apiVersion": "1.0.0",
+    "gatewayOrigin": "https://gateway.operator.example",
+    "receiverProfiles": [
+      {
+        "id": "c14cd31a-0299-46a4-b94a-90ead0506b77",
+        "source": "phonepe",
+        "displayName": "Example Workshop current account",
+        "maskedAccountSuffix": "4827",
+        "sourceTemplateId": null
+      },
+      {
+        "id": "73577f00-f681-4c2d-ae5c-aadd406f9922",
+        "source": "bank_sms",
+        "displayName": "Example Workshop current account",
+        "maskedAccountSuffix": "4827",
+        "sourceTemplateId": "fixture-bank-credit-v1"
+      }
+    ]
+  }
+}

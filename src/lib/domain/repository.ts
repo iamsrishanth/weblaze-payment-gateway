@@ -2,6 +2,7 @@ import type {
   CanonicalObservationV1,
   DeviceRecord,
   DeviceScope,
+  DiscoveredReceiverProfile,
   NewOrderInput,
   ObservationSource,
   PairingCredentialRecord,
@@ -69,6 +70,7 @@ export interface ReconcileOrderInput {
 export interface CreateReceiverAccountInput {
   label: string;
   payeeVpa: string;
+  maskedAccountSuffix?: string | null;
   verifiedBy: string;
   verified: boolean;
 }
@@ -113,6 +115,10 @@ export interface GatewayRepository {
   listReceiverAccounts(): Promise<ReceiverAccountRecord[]>;
   createReceiverAccount(input: CreateReceiverAccountInput): Promise<ReceiverAccountRecord>;
   listReceiverProfiles(): Promise<ReceiverProfileRecord[]>;
+  listDeviceReceiverProfiles(
+    deviceId: string,
+    configuredPayeeVpa: string,
+  ): Promise<DiscoveredReceiverProfile[]>;
   createReceiverProfile(input: CreateReceiverProfileInput): Promise<ReceiverProfileRecord>;
 
   getAdminByEmail(email: string): Promise<AdminRecord | null>;

@@ -58,6 +58,7 @@ interface ReceiverAccount {
   id: string;
   label: string;
   payeeVpa: string;
+  maskedAccountSuffix: string | null;
   verifiedAt: string | null;
   verifiedBy: string | null;
 }
@@ -358,6 +359,7 @@ export default function AdminTerminal({
       await sendJson("/api/admin/receiver-accounts", "POST", {
         label: String(form.get("label") ?? "").trim(),
         payeeVpa: data.payeeVpa,
+        maskedAccountSuffix: String(form.get("maskedAccountSuffix") ?? "") || null,
         verified: true,
         confirmation: "I checked the receiving account in the bank record.",
       });
@@ -759,9 +761,25 @@ export default function AdminTerminal({
             attach approved app or SMS sources to enrolled devices.
           </p>
           <form onSubmit={createAccount}>
-            <Field label="Internal account label">
-              <input name="label" required maxLength={80} placeholder="Primary INR receiving account" />
+            <Field label="Non-sensitive account display label">
+              <input name="label" required maxLength={80} placeholder="Main receiving account" />
             </Field>
+            <Field label="Optional bank account last four digits">
+              <input
+                name="maskedAccountSuffix"
+                inputMode="numeric"
+                pattern="[0-9]{4}"
+                maxLength={4}
+                autoComplete="off"
+                placeholder="Leave blank if unavailable"
+                aria-describedby="receiver-suffix-help"
+              />
+            </Field>
+            <p className="terminal-list-meta" id="receiver-suffix-help">
+              Enter only the final four digits. Never enter the full account number; this hint may be shown on
+              paired merchant devices. Use a non-sensitive account label because it is also shown on those
+              devices.
+            </p>
             <div className="terminal-list-meta" style={{ marginBottom: 12 }}>
               Configured payee: <strong>{data.payeeVpa}</strong>
             </div>
@@ -807,9 +825,19 @@ export default function AdminTerminal({
                 <option value="bank_sms">Bank SMS</option>
               </select>
             </Field>
-            <Field label="Bank SMS template ID (required for bank_sms)">
-              <input name="sourceTemplateId" maxLength={128} placeholder="Exact approved template identity" />
+            <Field label="Bank SMS template key (required for bank_sms)">
+              <input
+                name="sourceTemplateId"
+                maxLength={64}
+                pattern="^(?!.*(?:[A-Za-z0-9._:-]*[0-9]){4})[A-Za-z][A-Za-z0-9._:-]{0,63}$"
+                placeholder="Non-sensitive approved key"
+                aria-describedby="source-template-help"
+              />
             </Field>
+            <p className="terminal-list-meta" id="source-template-help">
+              Start with a letter; use only letters, digits, period, underscore, colon, or hyphen, with at
+              most three digits total. Do not use a VPA, account, phone, email, or other personal identifier.
+            </p>
             <button className="button button-secondary" type="submit" disabled={Boolean(busy)}>
               Add receiver profile
             </button>
@@ -823,6 +851,7 @@ export default function AdminTerminal({
                     <p className="terminal-list-title">{account.label}</p>
                     <div className="terminal-list-meta">
                       {account.payeeVpa} ·{" "}
+                      {account.maskedAccountSuffix ? `account ending ${account.maskedAccountSuffix} · ` : ""}
                       {account.verifiedAt ? `verified ${formatDate(account.verifiedAt)}` : "not verified"}
                     </div>
                   </div>

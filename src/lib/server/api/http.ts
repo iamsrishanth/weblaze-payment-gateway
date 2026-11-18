@@ -114,6 +114,21 @@ export function asApiError(error: unknown) {
       code: "invalid_request",
       message: "At least one supported device grant is required.",
     },
+    invalid_masked_account_suffix: {
+      status: 400,
+      code: "invalid_request",
+      message: "Provide exactly the last four digits, or leave the optional suffix blank.",
+    },
+    invalid_source_template: {
+      status: 400,
+      code: "invalid_request",
+      message: "Source template IDs must use a safe non-sensitive key format.",
+    },
+    validated_sms_template_required: {
+      status: 400,
+      code: "invalid_request",
+      message: "A safe, operator-approved source template ID is required for bank SMS.",
+    },
   };
   const mapped = repositoryErrors[code];
   if (mapped) return apiError(mapped.status, mapped.code, mapped.message);
@@ -164,6 +179,12 @@ export function requireJsonContentType(request: Request) {
   if (contentType !== "application/json") {
     throw new HttpError(400, "invalid_request", "Content-Type must be application/json.");
   }
+}
+
+export async function requireEmptyRequestBody(request: Request) {
+  if (request.body === null) return;
+  await readBoundedBody(request);
+  throw new HttpError(400, "invalid_request", "This signed GET endpoint requires an empty request body.");
 }
 
 export function requestTarget(request: Request): string {

@@ -23,6 +23,7 @@ export async function POST(request: Request) {
     const account = await repo.createReceiverAccount({
       label: data.label,
       payeeVpa: config.upiPayeeVpa,
+      maskedAccountSuffix: data.maskedAccountSuffix ?? null,
       verifiedBy: session.adminId,
       verified: true,
     });
@@ -31,6 +32,7 @@ export async function POST(request: Request) {
         id: account.id,
         label: account.label,
         payeeVpa: account.payeeVpa,
+        maskedAccountSuffix: account.maskedAccountSuffix,
         verifiedAt: account.verifiedAt?.toISOString() ?? null,
       },
       { status: 201, headers: { ...NO_STORE_HEADERS } },

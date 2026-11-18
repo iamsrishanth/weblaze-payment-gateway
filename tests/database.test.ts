@@ -184,6 +184,17 @@ test("one-time administrator bootstrap stores a verified password hash", async (
 });
 
 test("migrations, exact paise matching, reference uniqueness, and cross-source evidence", async (t) => {
+  const rowSecurity = await fixture.pglite.query<{ protectedTables: number; unprotectedTables: number }>(`
+    SELECT
+      count(*) FILTER (WHERE relrowsecurity)::integer AS "protectedTables",
+      count(*) FILTER (WHERE NOT relrowsecurity)::integer AS "unprotectedTables"
+    FROM pg_class AS c
+    JOIN pg_namespace AS n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public' AND c.relkind = 'r'
+  `);
+  assert.equal(rowSecurity.rows[0]?.protectedTables, 18);
+  assert.equal(rowSecurity.rows[0]?.unprotectedTables, 0);
+
   const sourceOrder = orderInput({ idempotencyScope: "merchant:paise", idempotencyKey: "paise-test" });
   const first = await fixture.repository.createOrder(sourceOrder);
   const secondInput = orderInput({

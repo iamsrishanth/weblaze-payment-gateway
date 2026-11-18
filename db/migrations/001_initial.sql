@@ -212,3 +212,23 @@ CREATE TABLE rate_limit_buckets (
   expires_at timestamptz NOT NULL
 );
 CREATE INDEX rate_limit_buckets_expiry_idx ON rate_limit_buckets (expires_at);
+
+-- Gateway data is private server state. No Supabase Data API policies are
+-- created for these tables, so only the server-side PostgreSQL role can access it.
+ALTER TABLE admins ENABLE ROW LEVEL SECURITY;
+ALTER TABLE devices ENABLE ROW LEVEL SECURITY;
+ALTER TABLE receiver_accounts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE receiver_profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE pairing_credentials ENABLE ROW LEVEL SECURITY;
+ALTER TABLE pair_request_nonces ENABLE ROW LEVEL SECURITY;
+ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE idempotency_records ENABLE ROW LEVEL SECURITY;
+ALTER TABLE device_request_nonces ENABLE ROW LEVEL SECURITY;
+ALTER TABLE observation_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE bank_credits ENABLE ROW LEVEL SECURITY;
+ALTER TABLE credit_cases ENABLE ROW LEVEL SECURITY;
+ALTER TABLE credit_case_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE credit_matches ENABLE ROW LEVEL SECURITY;
+ALTER TABLE bank_reconciliations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE audit_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE rate_limit_buckets ENABLE ROW LEVEL SECURITY;

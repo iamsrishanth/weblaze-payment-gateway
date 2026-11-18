@@ -12,6 +12,7 @@ export async function runMigrations(
       applied_at timestamptz NOT NULL DEFAULT now()
     )
   `);
+  await database.query("ALTER TABLE schema_migrations ENABLE ROW LEVEL SECURITY");
 
   const files = (await readdir(migrationDirectory))
     .filter((file) => /^\d+_[a-z0-9_-]+\.sql$/i.test(file))

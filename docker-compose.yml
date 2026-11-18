@@ -1,0 +1,73 @@
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env.local}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.local}
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env.local}
+    volumes:
+      - weblaze-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: tools
+    env_file:
+      - .env.local
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env.local with host db}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+    command: ["npm", "run", "db:migrate"]
+
+  bootstrap:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: tools
+    env_file:
+      - .env.local
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env.local with host db}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+    command: ["npm", "run", "admin:bootstrap"]
+
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner
+    env_file:
+      - .env.local
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env.local with host db}
+      PORT: "3000"
+      HOSTNAME: 0.0.0.0
+      ALLOW_PRIVATE_DATABASE_HOST: "true"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:${GATEWAY_PORT:-3000}:3000"
+    restart: unless-stopped
+
+volumes:
+  weblaze-postgres:

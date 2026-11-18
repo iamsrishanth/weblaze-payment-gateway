@@ -1,0 +1,10 @@
+{
+  "purpose": "Negative signature case. Verify against the signed-observation public key and signature; verification must fail.",
+  "method": "POST",
+  "pathAndQuery": "/api/v1/observations",
+  "body": "{\"schemaVersion\":1,\"eventId\":\"evt_fixture_0001\",\"source\":\"phonepe\",\"eventKind\":\"incoming_credit\",\"observedAt\":\"2026-01-01T00:00:00.000Z\",\"amountPaise\":24800,\"currency\":\"INR\",\"merchantRef\":\"WZ000000000000000000000001\",\"bankRef\":\"TESTUTR000000000001\",\"observedPayeeVpa\":\"fixture.merchant@upi\",\"receiverProfileId\":null,\"sourceTransactionId\":\"phonepe-internal-test-001\",\"sourceTemplateId\":null}",
+  "sameSignatureAs": "signed-observation.json",
+  "changedField": "amountPaise",
+  "changedFrom": 24900,
+  "changedTo": 24800
+}

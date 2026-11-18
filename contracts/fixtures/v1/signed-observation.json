@@ -1,0 +1,27 @@
+{
+  "purpose": "Synthetic contract verification vector. Never use this test-only private key for a real device.",
+  "headers": {
+    "X-Weblaze-Contract-Version": "1",
+    "X-Weblaze-Timestamp": "1767225600000",
+    "X-Weblaze-Nonce": "S8VKgEgi3W26-L2uTUi9Tg",
+    "X-Weblaze-Signature": "MEUCIQC7UqRcRUcsRVBtPqnT0NG4Fw6nk_a3Hl4hecIj-IeZBwIgSjyUJQM44mkK1Gf0qSWKD8f7gw0ElPDGwCCyrNk-8-U"
+  },
+  "method": "POST",
+  "pathAndQuery": "/api/v1/observations",
+  "body": "{\"schemaVersion\":1,\"eventId\":\"evt_fixture_0001\",\"source\":\"phonepe\",\"eventKind\":\"incoming_credit\",\"observedAt\":\"2026-01-01T00:00:00.000Z\",\"amountPaise\":24900,\"currency\":\"INR\",\"merchantRef\":\"WZ000000000000000000000001\",\"bankRef\":\"TESTUTR000000000001\",\"observedPayeeVpa\":\"fixture.merchant@upi\",\"receiverProfileId\":null,\"sourceTransactionId\":\"phonepe-internal-test-001\",\"sourceTemplateId\":null}",
+  "publicKey": {
+    "kty": "EC",
+    "x": "nH5YeDdYMDF7KAsDDhnNL_mPRokXxwu23JfcqhbjmSE",
+    "y": "h3ZHrmDRQxRcTPtkd7Nt1NIHXAV_CpkVBdwL1WEcOKI",
+    "crv": "P-256"
+  },
+  "testOnlyPrivateKey": {
+    "kty": "EC",
+    "x": "nH5YeDdYMDF7KAsDDhnNL_mPRokXxwu23JfcqhbjmSE",
+    "y": "h3ZHrmDRQxRcTPtkd7Nt1NIHXAV_CpkVBdwL1WEcOKI",
+    "crv": "P-256",
+    "d": "MvhzuPBGloO2L3eMlwdOudYchC4p28wZu0TxmbFzVLQ"
+  },
+  "expectedBodySha256": "aa50b0d9e1f162bc8a568fe58ed5c4b8f83741a9c4632aeaa74b22fe5912d385",
+  "expectedCanonical": "WEBLAZE-OBSERVER/1\nPOST\n/api/v1/observations\n1767225600000\nS8VKgEgi3W26-L2uTUi9Tg\n-\naa50b0d9e1f162bc8a568fe58ed5c4b8f83741a9c4632aeaa74b22fe5912d385"
+}

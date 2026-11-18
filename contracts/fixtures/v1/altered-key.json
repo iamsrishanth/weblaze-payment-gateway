@@ -1,0 +1,10 @@
+{
+  "purpose": "Negative public-key case. The known-good signature must fail under this unrelated synthetic public key.",
+  "publicKey": {
+    "kty": "EC",
+    "crv": "P-256",
+    "x": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "y": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  },
+  "sameSignatureAs": "signed-observation.json"
+}

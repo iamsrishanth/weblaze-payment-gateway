@@ -1,0 +1,48 @@
+{
+  "purpose": "Synthetic shared acceptance scenario; all values are examples and must not be used for live payment.",
+  "contractVersion": "1.0.0",
+  "createRequest": {
+    "method": "POST",
+    "path": "/api/v1/payment-links",
+    "idempotencyKey": "fixture.website.deposit.20260101.01",
+    "body": {
+      "amountPaise": 49950,
+      "description": "Website deposit",
+      "expiresAtOffsetSeconds": 3600
+    }
+  },
+  "lostResponseRetry": {
+    "repeatSameKeyAndBody": true,
+    "mustUseFreshTimestampAndNonce": true,
+    "expected": "same orderId, merchantRef, and checkoutUrl"
+  },
+  "customerCheckout": {
+    "openAsUnauthenticatedCustomer": true,
+    "expectedDescription": "Website deposit",
+    "expectedAmountPaise": 49950,
+    "expectedAmountText": "₹499.50",
+    "expectedExpiryOffsetSeconds": 3600,
+    "expectedPayeeVpa": "fixture.merchant@upi",
+    "expectedCurrency": "INR"
+  },
+  "matchingCredit": {
+    "schemaVersion": 1,
+    "eventId": "evt_fixture_link_49950_01",
+    "source": "bank_sms",
+    "eventKind": "incoming_credit",
+    "observedAtOffsetSeconds": 0,
+    "amountPaise": 49950,
+    "currency": "INR",
+    "merchantRef": "<merchantRef returned by the first create response>",
+    "bankRef": "TESTUTR499500000001",
+    "observedPayeeVpa": "fixture.merchant@upi",
+    "receiverProfileId": "fixture-receiver-profile",
+    "sourceTransactionId": "TESTBANKSMS-001",
+    "sourceTemplateId": "fixture-bank-credit-v1"
+  },
+  "expectedFinalStatus": "notification_confirmed",
+  "deniedCases": [
+    { "deviceGrant": "observations", "route": "POST /api/v1/payment-links", "expectedStatus": 403 },
+    { "deviceRevoked": true, "route": "GET /api/v1/payment-links", "expectedStatus": 401 }
+  ]
+}

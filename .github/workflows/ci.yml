@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      NODE_ENV: production
+      MERCHANT_DISPLAY_NAME: Copper Finch CI
+      GATEWAY_PUBLIC_ORIGIN: https://ci-gateway.weblaze
+      UPI_PAYEE_VPA: ci-payee@weblaze
+      DATABASE_URL: postgresql://ci_gateway_user:ci-fixture-credential-3e8f5d86e176bdc2@postgres.weblaze:5432/gateway_fixture
+      MERCHANT_API_KEY: ci-merchant-key-7c8f2c66d9d3a13c1e930c9d
+      SESSION_SECRET: ci-session-secret-43fd9b2e6207638378f8362a
+      ORDER_TOKEN_SECRET: ci-order-token-secret-9d5b38070c11c7e39431d7f4
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build

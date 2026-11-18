@@ -1,0 +1,550 @@
+openapi: 3.1.0
+info:
+  title: Weblaze Payment Gateway and Observer API
+  version: 1.0.0
+  description: >-
+    Single-merchant, INR-only direct UPI checkout and merchant-phone observer.
+    Hostnames, merchant labels, receiving VPAs, and credentials are instance
+    configuration. See observer-v1.md for signing, replay, matching, and review
+    requirements. All data in examples is synthetic.
+servers:
+  - url: https://gateway.operator.example
+    description: Replace with the canonical HTTPS origin returned by the paired instance.
+tags:
+  - name: Orders
+  - name: Device pairing
+  - name: Observations
+  - name: Mobile payment links
+  - name: Customer checkout
+security: []
+paths:
+  /api/v1/orders:
+    post:
+      tags: [Orders]
+      summary: Create a fixed-amount order for a server integration
+      description: |
+        Requires the installation's merchant API bearer key. The gateway fixes the
+        receiving VPA and INR currency. An Idempotency-Key is required and is scoped
+        to this credential. Repeating the same key and payload returns the original
+        order. Reusing a key with another payload returns 409. The response URL
+        contains only an opaque checkout token.
+      operationId: createOrder
+      security:
+        - MerchantApiKey: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateOrderRequest"
+            example:
+              amountPaise: 24900
+              description: Sample basket
+              expiresAt: "2026-01-01T01:00:00.000Z"
+      responses:
+        "200":
+          description: New order, or the original order for an idempotent replay
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreatedPaymentLink"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /api/v1/orders/{orderId}:
+    get:
+      tags: [Orders]
+      summary: Look up a merchant order status
+      operationId: getOrderStatus
+      security:
+        - MerchantApiKey: []
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Current server-side order status. Private bank evidence is excluded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MerchantOrderStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/devices/pair:
+    post:
+      tags: [Device pairing]
+      summary: Pair a merchant phone using a one-time code and P-256 proof of possession
+      description: |
+        The device creates its P-256 key locally, then signs this exact body using
+        the canonical v1 request signature. The server also checks HTTPS and Host
+        against its own configured canonical origin. Pairing codes expire in ten
+        minutes and are single-use. See contracts/observer-v1.md for byte encoding.
+      operationId: pairDevice
+      parameters:
+        - $ref: "#/components/parameters/ContractVersion"
+        - $ref: "#/components/parameters/Timestamp"
+        - $ref: "#/components/parameters/Nonce"
+        - $ref: "#/components/parameters/Signature"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PairDeviceRequest"
+            example:
+              pairingCode: TEST-CODE-ONLY
+              deviceName: Merchant phone
+              publicKey:
+                kty: EC
+                crv: P-256
+                x: nH5YeDdYMDF7KAsDDhnNL_mPRokXxwu23JfcqhbjmSE
+                y: h3ZHrmDRQxRcTPtkd7Nt1NIHXAV_CpkVBdwL1WEcOKI
+      responses:
+        "201":
+          description: Pairing succeeded; the returned details are derived from this installation's validated configuration.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PairDeviceResponse"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "410":
+          description: Pairing code is expired or already used
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "413":
+          $ref: "#/components/responses/BodyTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /api/v1/observations:
+    post:
+      tags: [Observations]
+      summary: Upload a signed PhonePe or bank SMS payment observation
+      description: |
+        Requires the observations grant. A 202 acknowledgment is sent only after
+        durable commit. No observation confirms an order merely by amount, time,
+        app callback, or sender label. Rules and duplicate semantics are in
+        contracts/observer-v1.md.
+      operationId: submitObservation
+      security:
+        - DeviceId: []
+      parameters:
+        - $ref: "#/components/parameters/ContractVersion"
+        - $ref: "#/components/parameters/Timestamp"
+        - $ref: "#/components/parameters/Nonce"
+        - $ref: "#/components/parameters/Signature"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CanonicalObservationV1"
+            example:
+              schemaVersion: 1
+              eventId: evt_fixture_0001
+              source: phonepe
+              eventKind: incoming_credit
+              observedAt: "2026-01-01T00:00:00.000Z"
+              amountPaise: 24900
+              currency: INR
+              merchantRef: WZ000000000000000000000001
+              bankRef: TESTUTR000000000001
+              observedPayeeVpa: fixture.merchant@upi
+              receiverProfileId: null
+              sourceTransactionId: phonepe-internal-test-001
+              sourceTemplateId: null
+      responses:
+        "202":
+          description: Event committed; provisional outcome is not a bank settlement guarantee
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ObservationAcknowledgment"
+        "200":
+          description: Same event and payload were already durably committed; retry used a fresh nonce
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ObservationAcknowledgment"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/InsufficientScope"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/BodyTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /api/v1/payment-links:
+    post:
+      tags: [Mobile payment links]
+      summary: Create a signed fixed-amount payment link from the merchant's phone
+      description: |
+        Requires links:create. A 499.50 INR acceptance fixture is in
+        contracts/fixtures/v1/payment-link-acceptance.json. An exact retry with a
+        fresh nonce and the same Idempotency-Key returns the original order. A
+        different request under that key returns 409.
+      operationId: createDevicePaymentLink
+      security:
+        - DeviceId: []
+      parameters:
+        - $ref: "#/components/parameters/ContractVersion"
+        - $ref: "#/components/parameters/Timestamp"
+        - $ref: "#/components/parameters/Nonce"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/Signature"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateOrderRequest"
+            example:
+              amountPaise: 49950
+              description: Website deposit
+              expiresAt: "2026-01-01T01:00:00.000Z"
+      responses:
+        "200":
+          description: New order, or the original order returned for an idempotent retry
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreatedPaymentLink"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/InsufficientScope"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/BodyTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+    get:
+      tags: [Mobile payment links]
+      summary: List recent payment links created by this device
+      description: |
+        Requires links:read_own. Returns only orders scoped to the authenticated
+        device; never returns links created from the dashboard or another device.
+      operationId: listDevicePaymentLinks
+      security:
+        - DeviceId: []
+      parameters:
+        - $ref: "#/components/parameters/ContractVersion"
+        - $ref: "#/components/parameters/Timestamp"
+        - $ref: "#/components/parameters/Nonce"
+        - $ref: "#/components/parameters/Signature"
+      responses:
+        "200":
+          description: Up to 100 recent links belonging to the device
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [links]
+                properties:
+                  links:
+                    type: array
+                    maxItems: 100
+                    items:
+                      $ref: "#/components/schemas/CreatedPaymentLink"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/InsufficientScope"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /api/public/checkouts/{token}/status:
+    get:
+      tags: [Customer checkout]
+      summary: Read the minimal status of a public checkout token
+      description: |
+        No login is required. The opaque token is the only customer credential.
+        This response excludes staff evidence, device identifiers, bank references,
+        and reconciliation details. Responses are `no-store`.
+      operationId: getPublicCheckoutStatus
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string, minLength: 40, maxLength: 64 }
+      responses:
+        "200":
+          description: Safe customer-visible status
+          headers:
+            Cache-Control:
+              schema: { type: string, const: "no-store, private" }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicCheckoutStatus"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+components:
+  securitySchemes:
+    MerchantApiKey:
+      type: http
+      scheme: bearer
+      bearerFormat: gateway-issued secret
+      description: The value configured as MERCHANT_API_KEY. Keep server-side only.
+    DeviceId:
+      type: apiKey
+      in: header
+      name: X-Weblaze-Device-Id
+      description: Device id plus the v1 P-256 signed request headers described in observer-v1.md.
+  parameters:
+    ContractVersion:
+      name: X-Weblaze-Contract-Version
+      in: header
+      required: true
+      schema: { type: string, const: "1" }
+    Timestamp:
+      name: X-Weblaze-Timestamp
+      in: header
+      required: true
+      schema: { type: string, pattern: "^[0-9]{13}$" }
+    Nonce:
+      name: X-Weblaze-Nonce
+      in: header
+      required: true
+      schema: { type: string, minLength: 22, maxLength: 128, pattern: "^[A-Za-z0-9_-]+$" }
+    Signature:
+      name: X-Weblaze-Signature
+      in: header
+      required: true
+      schema: { type: string, minLength: 80, maxLength: 160, pattern: "^[A-Za-z0-9_-]+$" }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Included verbatim in the request signature canonical bytes.
+      schema: { type: string, minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9._~]+$" }
+  schemas:
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            supportedVersions:
+              type: array
+              items: { type: integer }
+            retryAfterSeconds: { type: integer, minimum: 1 }
+    CreateOrderRequest:
+      type: object
+      additionalProperties: false
+      required: [amountPaise]
+      properties:
+        amountPaise:
+          type: integer
+          minimum: 1
+          maximum: 10000000
+          description: INR paise; 100 paise equals ₹1.00.
+        description:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 120
+          description: Optional escaped plain text shown to the customer.
+        expiresAt:
+          type: [string, "null"]
+          format: date-time
+          pattern: "Z$"
+          description: Optional UTC expiry; default 15 minutes, allowed from 1 minute to 24 hours after creation.
+    CreatedPaymentLink:
+      type: object
+      required: [orderId, merchantRef, amountPaise, description, expiresAt, status, checkoutUrl]
+      properties:
+        orderId: { type: string, format: uuid }
+        merchantRef: { type: string, pattern: "^WZ[0-9A-F]{24}$" }
+        amountPaise: { type: integer, minimum: 1, maximum: 10000000 }
+        description: { type: [string, "null"] }
+        expiresAt: { type: string, format: date-time }
+        status: { $ref: "#/components/schemas/PaymentStatus" }
+        checkoutUrl:
+          type: string
+          format: uri
+          description: Canonical origin plus /checkout/ and an opaque token only.
+    MerchantOrderStatus:
+      type: object
+      required: [orderId, merchantRef, amountPaise, status, expiresAt, bankReconciliationStatus]
+      properties:
+        orderId: { type: string, format: uuid }
+        merchantRef: { type: string }
+        amountPaise: { type: integer }
+        status: { $ref: "#/components/schemas/PaymentStatus" }
+        expiresAt: { type: string, format: date-time }
+        bankReconciliationStatus:
+          type: string
+          enum: [unreconciled, reconciled]
+        paymentSource:
+          type: [string, "null"]
+          enum: [phonepe, bank_sms, null]
+        reconciledAt: { type: [string, "null"], format: date-time }
+    PaymentStatus:
+      type: string
+      enum: [pending, notification_confirmed, needs_review, expired]
+    PublicKeyJwk:
+      type: object
+      additionalProperties: false
+      required: [kty, crv, x, y]
+      properties:
+        kty: { type: string, const: EC }
+        crv: { type: string, const: P-256 }
+        x: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" }
+        y: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" }
+    PairDeviceRequest:
+      type: object
+      additionalProperties: false
+      required: [pairingCode, deviceName, publicKey]
+      properties:
+        pairingCode: { type: string, minLength: 12, maxLength: 32 }
+        deviceName: { type: string, minLength: 1, maxLength: 64 }
+        publicKey: { $ref: "#/components/schemas/PublicKeyJwk" }
+    PairDeviceResponse:
+      type: object
+      required: [gatewayOrigin, merchantDisplayName, payeeVpa, currency, apiVersion, deviceId, grantedScopes]
+      properties:
+        gatewayOrigin: { type: string, format: uri }
+        merchantDisplayName: { type: string }
+        payeeVpa: { type: string }
+        currency: { type: string, const: INR }
+        apiVersion: { type: string, const: 1.0.0 }
+        deviceId: { type: string, format: uuid }
+        grantedScopes:
+          type: array
+          uniqueItems: true
+          items: { $ref: "#/components/schemas/DeviceScope" }
+    DeviceScope:
+      type: string
+      enum: [observations, "links:create", "links:read_own"]
+    CanonicalObservationV1:
+      type: object
+      additionalProperties: false
+      required:
+        [
+          schemaVersion,
+          eventId,
+          source,
+          eventKind,
+          observedAt,
+          amountPaise,
+          currency,
+          merchantRef,
+          bankRef,
+          observedPayeeVpa,
+          receiverProfileId,
+          sourceTransactionId,
+          sourceTemplateId,
+        ]
+      properties:
+        schemaVersion: { type: integer, const: 1 }
+        eventId: { type: string, minLength: 8, maxLength: 128 }
+        source: { type: string, enum: [phonepe, bank_sms] }
+        eventKind: { type: string, enum: [incoming_credit, reversal] }
+        observedAt: { type: string, format: date-time, pattern: "Z$" }
+        amountPaise: { type: integer, minimum: 1, maximum: 10000000 }
+        currency: { type: string, const: INR }
+        merchantRef: { type: [string, "null"], maxLength: 64 }
+        bankRef: { type: [string, "null"], maxLength: 128 }
+        observedPayeeVpa: { type: [string, "null"], maxLength: 255 }
+        receiverProfileId: { type: [string, "null"], format: uuid }
+        sourceTransactionId:
+          {
+            type: [string, "null"],
+            maxLength: 128,
+            description: App/provider internal ID; never treated as merchantRef or bankRef.,
+          }
+        sourceTemplateId:
+          {
+            type: [string, "null"],
+            maxLength: 128,
+            description: Operator-approved SMS template identity; required for eligible bank_sms credits.,
+          }
+    ObservationAcknowledgment:
+      type: object
+      required: [accepted, duplicate]
+      properties:
+        accepted: { type: boolean, const: true }
+        duplicate: { type: boolean }
+    PublicCheckoutStatus:
+      type: object
+      required: [orderId, merchantRef, amountPaise, currency, status, expiresAt]
+      properties:
+        orderId: { type: string, format: uuid }
+        merchantRef: { type: string }
+        amountPaise: { type: integer }
+        currency: { type: string, const: INR }
+        status: { $ref: "#/components/schemas/PaymentStatus" }
+        expiresAt: { type: string, format: date-time }
+        customerStatusLabel:
+          type: string
+          enum: [Awaiting payment, Payment notification received, Payment being reviewed, Link expired]
+  responses:
+    InvalidRequest:
+      description: Request fields or canonical signing headers are invalid
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    Unauthorized:
+      description: Missing, invalid, revoked, expired, or incorrectly signed credential
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    InsufficientScope:
+      description: Device is authenticated but lacks the required server-side grant
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    Conflict:
+      description: Unsupported version, replay, idempotency conflict, or event ID conflict
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    NotFound:
+      description: Resource not found or not owned by the authenticated principal
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    BodyTooLarge:
+      description: Exact request body exceeds 32 KiB
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    RateLimited:
+      description: The source or credential exceeded its configured request rate
+      headers:
+        Retry-After:
+          schema: { type: integer, minimum: 1 }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
